@@ -1,0 +1,13 @@
+post_install()
+{
+   systemctl daemon-reload
+}
+
+post_upgrade()
+{
+   systemctl daemon-reload
+   if systemctl is-enabled roon-extension-manager
+   then
+      systemctl restart roon-extension-manager
+   fi
+}

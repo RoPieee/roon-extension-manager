@@ -1,0 +1,15 @@
+[Unit]
+Description=TheAppgineer Roon extension for managing Roon extensions
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/TheAppgineer/extension-manager
+ExecStart=/usr/bin/node /opt/TheAppgineer/extension-manager/manager.js
+Restart=always
+RestartSec=10
+SyslogIdentifier=theappgineer-extension-manager
+#Environment=NODE_PORT=80 NODE_DEBUG=info NODE_SETTINGS=/data/ropieee.conf
+
+[Install]
+WantedBy=multi-user.target
+

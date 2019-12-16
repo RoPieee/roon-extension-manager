@@ -2,3 +2,6 @@ node_modules
 config.json
 running.json
 logging.json
+pkg
+src
+extension-manager-checkout
