@@ -24,7 +24,6 @@ const ACTION_NO_CHANGE = 0;
 
 const PORT = 2507;
 
-var core;
 var pending_actions = {};
 var category_list = [];
 var extension_list = [];
@@ -38,22 +37,16 @@ var last_is_error;
 var roon = new RoonApi({
     extension_id:        'com.theappgineer.extension-manager',
     display_name:        "Roon Extension Manager",
-    display_version:     "0.11.1",
+    display_version:     "0.11.4",
     publisher:           'The Appgineer',
     email:               'theappgineer@gmail.com',
     website:             `http://${get_ip()}:${PORT}/extension-logs.tar.gz`,
 
-    core_paired: function(core_) {
-        core = core_;
-        last_is_error || set_status("Core paired", false);
-
+    core_found: function() {
         clear_watchdog_timer();
         setup_ping_timer();
     },
-    core_unpaired: function(core_) {
-        core = undefined;
-        console.log("Core unpaired!");
-
+    core_lost: function() {
         clear_ping_timer();
         setup_watchdog_timer();
     }
@@ -81,9 +74,18 @@ var svc_settings = new RoonApiSettings(roon, {
             svc_settings.update_settings(l);
             roon.save_config("settings", ext_settings);
 
-            installer.set_log_state(ext_settings.logging);
             set_update_timer();
             perform_pending_actions();
+
+            if (installer.is_idle()) {
+                installer.set_on_activity_changed();
+                installer.set_log_state(ext_settings.logging);
+            } else {
+                installer.set_on_activity_changed(() => {
+                    installer.set_on_activity_changed();
+                    installer.set_log_state(ext_settings.logging);
+                });
+            }
         }
     }
 });
@@ -92,15 +94,13 @@ var svc_status = new RoonApiStatus(roon);
 var timer = new ApiTimeInput();
 
 var installer = new ApiExtensionInstaller({
+    started: function() {
+        roon.start_discovery();
+    },
     repository_changed: function(values) {
         category_list = values;
     },
     status_changed: function(message, is_error) {
-        if (core === undefined) {
-            core = null;
-            roon.start_discovery();
-        }
-
         set_status(message, is_error);
     }
 }, ext_settings.logging, true, process.argv[2]);
@@ -115,7 +115,6 @@ function makelayout(settings) {
         layout:    [],
         has_error: false
     };
-
     let global = {
         type:        "group",
         title:       "[GLOBAL SETTINGS]",
@@ -151,19 +150,23 @@ function makelayout(settings) {
     let extension = {
         type:    "group",
         title:   "(no extension selected)",
-        items:   [],
+        items:   []
     };
     let status_string = {
-        type:    "label",
+        type:    "label"
     };
     let action = {
         type:    "dropdown",
         title:   "Action",
         values:  [{ title: "(select action)", value: undefined }],
         setting: "action"
-    }
+    };
 
     const features = installer.get_features();
+
+    installer.set_on_activity_changed(() => {
+        svc_settings.update_settings(l);
+    });
 
     if (!features || features.auto_update != 'off') {
         global.items.push(update);
@@ -231,20 +234,21 @@ function makelayout(settings) {
             status_string.title += (status.version ? ": version " + status.version : "");
             status_string.title += (status.tag ? ": tag " + status.tag : "");
 
-            if (is_pending(name)) {
-                action_list = [{ title: 'Revert Action', value: ACTION_NO_CHANGE }];
-            } else {
-                action_list = actions.actions;
-            }
+            if (installer.is_idle(name)) {
+                if (is_pending(name)) {
+                    action_list = [{ title: 'Revert Action', value: ACTION_NO_CHANGE }];
+                } else {
+                    action_list = actions.actions;
+                }
 
-            action.values = action.values.concat(action_list);
+                action.values = action.values.concat(action_list);
+            } else {
+                action.values[0].title = '(in progress...)';
+            }
 
             extension.items.push(author);
             extension.items.push(status_string);
-
-            if (action.values.length > 1) {
-                extension.items.push(action);
-            }
+            extension.items.push(action);
 
             if (!is_pending(name) && actions.options) {
                 extension.items.push(create_options_group(actions.options));
@@ -415,7 +419,7 @@ function update_pending_actions(settings) {
 function get_pending_actions_string() {
     let pending_actions_string = ""
 
-    for (let name in pending_actions) {
+    for (const name in pending_actions) {
         pending_actions_string += pending_actions[name].friendly + "\n";
     }
 
@@ -429,6 +433,9 @@ function get_pending_actions_string() {
 function perform_pending_actions() {
     for (const name in pending_actions) {
         installer.perform_action(pending_actions[name].action, name, pending_actions[name].options);
+        
+        // Consume action
+        delete pending_actions[name];
     }
 }
 
@@ -484,9 +491,9 @@ function timer_timed_out() {
 }
 
 function setup_ping_timer() {
-    clear_ping_timer();
-
-    ping_timer_id = setInterval(ping, 60000);
+    if (!ping_timer_id) {
+        ping_timer_id = setInterval(ping, 60000);
+    }
 }
 
 function ping() {
@@ -538,13 +545,13 @@ http.createServer(function(request, response) {
                     response.end();
                 }
 
-                set_status('Error reading logs archive: ' + error.code + '\n', true);
+                set_status('Error reading logs archive: ' + error.code, true);
             }
             else {
                 response.writeHead(200, { 'Content-Type': contentType });
                 response.end(content, 'utf-8');
 
-                set_status('Download request for logs archive processed\n', false);
+                set_status('Download request for logs archive processed', false);
             }
         });
     });
@@ -552,18 +559,19 @@ http.createServer(function(request, response) {
 
 function get_ip() {
     const os = require('os');
-    let ifaces = os.networkInterfaces();
-    let ip_address;
+    const ifaces = os.networkInterfaces();
 
     for (const ifname in ifaces) {
-        ifaces[ifname].forEach(function (iface) {
-            if (iface.family == 'IPv4' && !iface.internal) {
-                ip_address = iface.address;
+        const iface = ifaces[ifname];
+
+        for (let i = 0; i < iface.length; i++) {
+            if (iface[i].family == 'IPv4' && !iface[i].internal) {
+                return iface[i].address;
             }
-        });
+        }
     }
 
-    return ip_address;
+    return undefined;
 }
 
 function init() {
